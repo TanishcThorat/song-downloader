@@ -32,6 +32,33 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from mangum import Mangum
 
+# --- Configuration for Cookies ---
+# Dynamic path configuration that works in both development (Windows) and production (Ubuntu/EC2)
+def get_cookie_file_path():
+    """Get the appropriate cookie file path based on the environment"""
+    # Check if we're on Windows (development) or Linux (production)
+    if sys.platform == "win32":
+        # Windows development environment
+        return r"d:\portfolio\song-downloader\cookies\www.youtube.com_cookies.txt"
+    else:
+        # Linux/Ubuntu production environment (EC2)
+        # Check for common deployment paths
+        possible_paths = [
+            "/home/ubuntu/song-downloader/cookies/www.youtube.com_cookies.txt",  # EC2 deployment path
+            "/app/cookies/www.youtube.com_cookies.txt",  # Docker container path
+            "./cookies/www.youtube.com_cookies.txt",  # Relative path fallback
+            os.path.join(os.path.dirname(os.path.dirname(__file__)), "cookies", "www.youtube.com_cookies.txt")  # Project relative
+        ]
+        
+        for path in possible_paths:
+            if os.path.exists(path):
+                return path
+        
+        # Return the most likely production path if none exist yet
+        return "/home/ubuntu/song-downloader/cookies/cookies.txt"
+
+COOKIE_FILE_PATH = get_cookie_file_path()
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -53,6 +80,8 @@ if sys.platform == "win32":
 async def lifespan(app: FastAPI):
     # Startup
     logger.info("Starting Song Downloader API...")
+    if not Path(COOKIE_FILE_PATH).exists():
+        logger.warning(f"Cookie file not found at: {COOKIE_FILE_PATH}. Downloads requiring login may fail.")
     yield
     # Shutdown
     logger.info("Shutting down Song Downloader API...")
@@ -282,12 +311,13 @@ class YtDlpDownloader:
             # More flexible format selection with multiple fallbacks
             'format': 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best[height<=720]/best',
             'noplaylist': True,
-            'quiet': True,
+            # 'quiet': True,
             'no_warnings': True,
             'no_post_overwrites': True,
             'playlist_items': '1',  # Only download first result
             'socket_timeout': 60,
             'retries': 3,
+            'cookies': COOKIE_FILE_PATH,
             'fragment_retries': 3,
             # Enhanced YouTube Music configuration
             'extractor_args': {

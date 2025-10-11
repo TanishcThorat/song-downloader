@@ -278,6 +278,12 @@ htmlcov/
 # pytest
 .pytest_cache/
 
+# Cookie files (contain sensitive authentication data)
+cookies/*.txt
+cookies/*.json
+!cookies/*_example.txt
+!cookies/README.md
+
 # Backup files
 *.bak
 *.backup
