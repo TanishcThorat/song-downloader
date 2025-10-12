@@ -27,9 +27,10 @@ import time
 import yt_dlp
 from yt_dlp.utils import DownloadError, ExtractorError
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Depends, Header
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.status import HTTP_403_FORBIDDEN
 from pydantic import BaseModel, Field
 from mangum import Mangum
 
@@ -59,6 +60,13 @@ def get_cookie_file_path():
         return "/home/ubuntu/song-downloader/cookies/cookies.txt"
 
 COOKIE_FILE_PATH = get_cookie_file_path()
+
+# --- Define Global API Key (Reads from Environment Variable) ---
+# For Windows local development: set API_SECRET_KEY=dev-local-key in PowerShell
+# For EC2 production: export API_SECRET_KEY="your-secure-key" in systemd service
+API_SECRET_KEY = os.environ.get("API_SECRET_KEY", "dev-local-key")
+logger_setup = False  # Will be set to True after logging is configured
+# ---------------------------------------------------------------
 
 # Configure logging
 logging.basicConfig(
@@ -102,6 +110,23 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Define a Dependency Function to validate the API Key header
+async def get_api_key(x_api_key: str = Header(None)):
+    """Validates the presence and correctness of the X-API-KEY header."""
+    if x_api_key is None:
+        raise HTTPException(
+            status_code=HTTP_403_FORBIDDEN, 
+            detail="Authorization failed: X-API-KEY header missing"
+        )
+    if x_api_key != API_SECRET_KEY:
+        logger.warning(f"Invalid API key attempt: {x_api_key}")
+        raise HTTPException(
+            status_code=HTTP_403_FORBIDDEN, 
+            detail="Invalid API Key"
+        )
+    # Success
+    return x_api_key
 
 # Error handling middleware
 @app.middleware("http")
@@ -511,9 +536,12 @@ class YtDlpDownloader:
 
 
 @app.post("/api/spotify/download-song")
-async def download_song_frontend(request: DownloadRequest):
+async def download_song_frontend(
+    request: DownloadRequest,
+    api_key: str = Depends(get_api_key)  # API Key validation required
+):
     """
-    Production-ready frontend-compatible download endpoint
+    Production-ready frontend-compatible download endpoint. Requires X-API-KEY header.
     Returns audio blob directly with comprehensive error handling and performance optimization
     """
     request_id = f"req_{int(time.time() * 1000)}"
