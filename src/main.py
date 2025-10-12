@@ -323,20 +323,16 @@ class YtDlpDownloader:
             music_search_url = f"https://music.youtube.com/search?q={urllib.parse.quote(search_query)}"
             logger.info(f"Starting YouTube Music search: {music_search_url}")
             
-            # Build yt-dlp command (mimicking the successful terminal command)
+            # Build yt-dlp command (optimized for reliability)
             cmd = [
                 sys.executable, '-m', 'yt_dlp',
-                '-f', 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best',
+                '-f', 'bestaudio/best',  # Simple, reliable format
                 '--no-post-overwrites',
                 '--no-playlist',
                 '--playlist-items', '1',  # Only download first result
-                '--socket-timeout', '60',
-                '--retries', '3',
-                '--fragment-retries', '3',
-                '--geo-bypass',
-                '--geo-bypass-country', 'US',
-                '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                '--extractor-args', 'youtube:player_client=android_music,android,web;skip=dash,hls',
+                '--socket-timeout', '120',
+                '--retries', '2',
+                '--user-agent', 'yt-dlp/2023.07.06',
                 '-o', output_template,
                 music_search_url
             ]
@@ -434,16 +430,18 @@ class YtDlpDownloader:
             output_template = str(Path(output_dir) / '%(title)s.%(ext)s')
             music_search_url = f"https://music.youtube.com/search?q={urllib.parse.quote(search_query)}"
             
-            # Minimal command for fallback (similar to download_spotify_song_simple.py)
+            # Enhanced fallback command with format preferences
             cmd = [
                 sys.executable, '-m', 'yt_dlp',
-                '-f', 'bestaudio/best',
+                '-f', 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best',
                 '--no-post-overwrites',
                 '--no-playlist',
                 '--playlist-items', '1',
-                '--socket-timeout', '120',
-                '--retries', '2',
-                '--user-agent', 'yt-dlp/2023.07.06',
+                '--socket-timeout', '180',
+                '--retries', '3',
+                '--fragment-retries', '2',
+                '--geo-bypass',
+                '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                 '-o', output_template,
                 music_search_url
             ]
