@@ -10,6 +10,7 @@ import asyncio
 import json
 import os
 import sys
+import subprocess
 import tempfile
 import urllib.parse
 import urllib.request
@@ -304,128 +305,103 @@ class SpotifyTrackExtractor:
 
 
 class YtDlpDownloader:
-    """Production-ready yt-dlp wrapper with proper error handling and performance optimization"""
+    """Production-ready yt-dlp wrapper using subprocess calls to mimic shell environment"""
     
     def __init__(self):
-        self.default_opts = {
-            # More flexible format selection with multiple fallbacks
-            'format': 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best[height<=720]/best',
-            'noplaylist': True,
-            # 'quiet': True,
-            'no_warnings': True,
-            'no_post_overwrites': True,
-            'playlist_items': '1',  # Only download first result
-            'socket_timeout': 60,
-            'retries': 3,
-            'cookies': COOKIE_FILE_PATH,
-            'fragment_retries': 3,
-            # Enhanced YouTube Music configuration
-            'extractor_args': {
-                'youtube': {
-                    'player_client': ['android_music', 'android', 'web'],
-                    'skip': ['dash', 'hls']
-                }
-            },
-            # User agent optimized for YouTube Music
-            'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-            },
-            'geo_bypass': True,
-            'geo_bypass_country': 'US',
-        }
+        # Store cookie file path for subprocess calls
+        self.cookie_file = COOKIE_FILE_PATH
     
     async def download_audio(self, search_query: str, output_dir: str) -> DownloadResult:
-        """Download audio using yt-dlp Python API with async support"""
+        """Download audio using yt-dlp subprocess with async support"""
         start_time = time.time()
         
         try:
             # Create output template
             output_template = str(Path(output_dir) / '%(title)s.%(ext)s')
             
-            # Configure yt-dlp options
-            ydl_opts = {
-                **self.default_opts,
-                'outtmpl': output_template,
-            }
+            # Use YouTube Music search URL (same as what worked in terminal)
+            music_search_url = f"https://music.youtube.com/search?q={urllib.parse.quote(search_query)}"
+            logger.info(f"Starting YouTube Music search: {music_search_url}")
             
-            # Add progress hook for monitoring
-            def progress_hook(d):
-                if d['status'] == 'downloading':
-                    logger.info(f"Downloading: {d.get('_percent_str', 'N/A')} - {d.get('_speed_str', 'N/A')}")
-                elif d['status'] == 'finished':
-                    logger.info(f"Download completed: {d['filename']}")
+            # Build yt-dlp command (mimicking the successful terminal command)
+            cmd = [
+                sys.executable, '-m', 'yt_dlp',
+                '-f', 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best',
+                '--no-post-overwrites',
+                '--no-playlist',
+                '--playlist-items', '1',  # Only download first result
+                '--socket-timeout', '60',
+                '--retries', '3',
+                '--fragment-retries', '3',
+                '--geo-bypass',
+                '--geo-bypass-country', 'US',
+                '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                '--extractor-args', 'youtube:player_client=android_music,android,web;skip=dash,hls',
+                '-o', output_template,
+                music_search_url
+            ]
             
-            ydl_opts['progress_hooks'] = [progress_hook]
+            # Add cookies if file exists
+            if Path(self.cookie_file).exists():
+                cmd.extend(['--cookies', self.cookie_file])
+                logger.info(f"Using cookies from: {self.cookie_file}")
+            else:
+                logger.warning(f"Cookie file not found: {self.cookie_file}")
             
-            # Use thread executor for non-blocking yt-dlp execution
+            logger.info(f"Executing yt-dlp command: {' '.join(cmd)}")
+            
+            # Use thread executor for non-blocking subprocess execution
             loop = asyncio.get_event_loop()
             
             def _download():
-                # Determine output template
-                use_consistent_naming = False  # Can be made configurable later
-                if use_consistent_naming:
-                    # Use consistent naming: rename previous latest to previous, download new as latest
-                    output_template = os.path.join(output_dir, 'temp_download.%(ext)s')
-                else:
-                    output_template = os.path.join(output_dir, '%(title)s.%(ext)s')
-                
-                # Override the output template in ydl_opts
-                ydl_opts['outtmpl'] = output_template
-                
-                # yt-dlp options - download best audio from YouTube Music
-                # Use the YouTube Music extractor directly with a search URL
-                # Format: https://music.youtube.com/search?q=<query>
-                music_search_url = f"https://music.youtube.com/search?q={urllib.parse.quote(search_query)}"
-                logger.info(f"Starting YouTube Music search: {music_search_url}")
-                
-                # Try with the configured format first, then fallback to simpler formats
-                format_attempts = [
-                    ydl_opts['format'],  # Original format string
-                    'bestaudio/best',    # Simpler fallback
-                    'best'               # Last resort
-                ]
-                
-                for i, format_option in enumerate(format_attempts):
-                    try:
-                        current_opts = {**ydl_opts, 'format': format_option}
-                        logger.info(f"Attempt {i+1}: Using format '{format_option}'")
-                        
-                        with yt_dlp.YoutubeDL(current_opts) as ydl:
-                            ydl.download([music_search_url])
-                            
-                            # Find downloaded file
-                            audio_extensions = ['.m4a', '.webm', '.opus', '.mp3', '.aac', '.mp4']
-                            for file in Path(output_dir).iterdir():
-                                if file.is_file() and file.suffix.lower() in audio_extensions:
-                                    logger.info(f"Successfully downloaded: {file.name}")
-                                    return {
-                                        'file_path': str(file),
-                                        'file_name': file.name,
-                                        'file_size': file.stat().st_size,
-                                        'content_type': self._get_content_type(file.suffix)
-                                    }
-                            
-                    except Exception as e:
-                        logger.warning(f"Format '{format_option}' failed: {str(e)}")
-                        # Clear any partially downloaded files before next attempt
-                        for file in Path(output_dir).iterdir():
-                            if file.is_file():
-                                try:
-                                    file.unlink()
-                                except:
-                                    pass
-                        
-                        if i < len(format_attempts) - 1:
-                            continue
-                        else:
-                            raise e
+                try:
+                    result = subprocess.run(
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        encoding='utf-8',
+                        errors='replace',
+                        timeout=120,
+                        cwd=output_dir  # Set working directory
+                    )
                     
-                raise Exception("All format attempts failed - no file downloaded")
+                    if result.returncode == 0:
+                        logger.info("yt-dlp subprocess completed successfully")
+                        if result.stdout:
+                            logger.info(f"yt-dlp stdout: {result.stdout[-500:]}")  # Last 500 chars
+                        
+                        # Find downloaded file
+                        audio_extensions = ['.m4a', '.webm', '.opus', '.mp3', '.aac', '.mp4']
+                        for file in Path(output_dir).iterdir():
+                            if file.is_file() and file.suffix.lower() in audio_extensions:
+                                logger.info(f"Successfully downloaded: {file.name}")
+                                return {
+                                    'file_path': str(file),
+                                    'file_name': file.name,
+                                    'file_size': file.stat().st_size,
+                                    'content_type': self._get_content_type(file.suffix)
+                                }
+                        
+                        raise Exception("Download completed but no audio file found")
+                    else:
+                        error_msg = f"yt-dlp failed with return code {result.returncode}"
+                        if result.stderr:
+                            error_msg += f"\nStderr: {result.stderr}"
+                        if result.stdout:
+                            error_msg += f"\nStdout: {result.stdout}"
+                        logger.error(error_msg)
+                        raise Exception(error_msg)
+                        
+                except subprocess.TimeoutExpired:
+                    raise Exception("yt-dlp subprocess timed out after 120 seconds")
+                except Exception as e:
+                    logger.error(f"Subprocess execution failed: {str(e)}")
+                    raise e
             
             # Execute with timeout
             result = await asyncio.wait_for(
                 loop.run_in_executor(None, _download),
-                timeout=120.0
+                timeout=150.0  # Slightly longer than subprocess timeout
             )
             
             download_time = time.time() - start_time
@@ -434,16 +410,16 @@ class YtDlpDownloader:
             return DownloadResult(success=True, **result)
             
         except asyncio.TimeoutError:
-            error_msg = "Download timed out after 120 seconds"
+            error_msg = "Download timed out after 150 seconds"
             logger.error(error_msg)
             return DownloadResult(success=False, error=error_msg)
             
-        except DownloadError as e:
-            error_msg = f"yt-dlp download error: {str(e)}"
-            logger.error(error_msg)
+        except Exception as e:
+            error_msg = f"Download error: {str(e)}"
+            logger.error(f"{error_msg}\n{traceback.format_exc()}")
             
-            # If it's a 403 error, try alternative approach
-            if "403" in str(e) or "Forbidden" in str(e):
+            # If download fails, try fallback approach
+            if "403" in str(e) or "Forbidden" in str(e) or "HTTP Error 403" in str(e):
                 logger.info("Attempting fallback download with relaxed restrictions...")
                 try:
                     return await self._fallback_download(search_query, output_dir)
@@ -451,53 +427,51 @@ class YtDlpDownloader:
                     logger.error(f"Fallback download also failed: {fallback_error}")
             
             return DownloadResult(success=False, error=error_msg)
-            
-        except ExtractorError as e:
-            error_msg = f"yt-dlp extractor error: {str(e)}"
-            logger.error(error_msg)
-            return DownloadResult(success=False, error=error_msg)
-            
-        except Exception as e:
-            error_msg = f"Unexpected download error: {str(e)}"
-            logger.error(f"{error_msg}\n{traceback.format_exc()}")
-            return DownloadResult(success=False, error=error_msg)
     
     async def _fallback_download(self, search_query: str, output_dir: str) -> DownloadResult:
-        """Fallback download method with minimal restrictions"""
+        """Fallback download method with minimal restrictions using subprocess"""
         try:
-            # Minimal yt-dlp options for fallback - still targeting YouTube Music
-            fallback_opts = {
-                'format': 'worst[ext=m4a]/worst[ext=webm]/worst',
-                'noplaylist': True,
-                'quiet': False,
-                'no_warnings': False,
-                'no_post_overwrites': True,
-                'playlist_items': '1',  # Only download first result
-                'socket_timeout': 120,
-                'retries': 2,
-                'outtmpl': str(Path(output_dir) / '%(title)s.%(ext)s'),
-                'http_headers': {
-                    'User-Agent': 'yt-dlp/2023.07.06'
-                },
-                'extractor_args': {
-                    'youtube': {
-                        'player_client': ['android_music', 'android'],
-                    }
-                },
-            }
+            output_template = str(Path(output_dir) / '%(title)s.%(ext)s')
+            music_search_url = f"https://music.youtube.com/search?q={urllib.parse.quote(search_query)}"
+            
+            # Minimal command for fallback (similar to download_spotify_song_simple.py)
+            cmd = [
+                sys.executable, '-m', 'yt_dlp',
+                '-f', 'bestaudio/best',
+                '--no-post-overwrites',
+                '--no-playlist',
+                '--playlist-items', '1',
+                '--socket-timeout', '120',
+                '--retries', '2',
+                '--user-agent', 'yt-dlp/2023.07.06',
+                '-o', output_template,
+                music_search_url
+            ]
+            
+            # Add cookies if available
+            if Path(self.cookie_file).exists():
+                cmd.extend(['--cookies', self.cookie_file])
+            
+            logger.info(f"Fallback command: {' '.join(cmd)}")
             
             loop = asyncio.get_event_loop()
             
             def _fallback_download_sync():
-                with yt_dlp.YoutubeDL(fallback_opts) as ydl:
-                    # Use YouTube Music URL for fallback as well
-                    music_search_url = f"https://music.youtube.com/search?q={urllib.parse.quote(search_query)}"
-                    logger.info(f"Fallback YouTube Music search: {music_search_url}")
-                    ydl.download([music_search_url])
-                    
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    encoding='utf-8',
+                    errors='replace',
+                    timeout=180,
+                    cwd=output_dir
+                )
+                
+                if result.returncode == 0:
                     # Find downloaded file
+                    audio_extensions = ['.m4a', '.webm', '.opus', '.mp3', '.aac']
                     for file in Path(output_dir).iterdir():
-                        if file.is_file() and file.suffix.lower() in ['.m4a', '.webm', '.opus', '.mp3', '.aac']:
+                        if file.is_file() and file.suffix.lower() in audio_extensions:
                             return {
                                 'file_path': str(file),
                                 'file_name': file.name,
@@ -505,10 +479,15 @@ class YtDlpDownloader:
                                 'content_type': self._get_content_type(file.suffix)
                             }
                     raise Exception("Fallback download: file not found")
+                else:
+                    error_msg = f"Fallback failed with return code {result.returncode}"
+                    if result.stderr:
+                        error_msg += f"\nStderr: {result.stderr}"
+                    raise Exception(error_msg)
             
             result = await asyncio.wait_for(
                 loop.run_in_executor(None, _fallback_download_sync),
-                timeout=180.0
+                timeout=200.0
             )
             
             return DownloadResult(success=True, **result)
