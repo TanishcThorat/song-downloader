@@ -336,218 +336,93 @@ class YtDlpDownloader:
         # Store cookie file path for subprocess calls
         self.cookie_file = COOKIE_FILE_PATH
     
-    async def download_audio(self, search_query: str, output_dir: str) -> DownloadResult:
-        """Download audio using yt-dlp subprocess with async support"""
+    async def download_audio(self, search_query: str, output_dir: str = None):
+        """Download audio using yt-dlp subprocess streaming to stdout"""
         start_time = time.time()
         
         try:
-            # Create output template
-            output_template = str(Path(output_dir) / '%(title)s.%(ext)s')
-            
-            # Use YouTube Music search URL (same as what worked in terminal)
+            # Use YouTube Music search URL
             music_search_url = f"https://music.youtube.com/search?q={urllib.parse.quote(search_query)}"
             logger.info(f"Starting YouTube Music search: {music_search_url}")
             
-            # Build yt-dlp command (optimized for reliability)
+            # Build yt-dlp command to output to stdout
             cmd = [
                 sys.executable, '-m', 'yt_dlp',
-                '-f', 'bestaudio/best',  # Simple, reliable format
+                '-f', 'bestaudio[ext=m4a]/bestaudio/best',
                 '--no-post-overwrites',
                 '--no-playlist',
-                '--playlist-items', '1',  # Only download first result
+                '--playlist-items', '1',
                 '--socket-timeout', '120',
                 '--retries', '2',
-                '-o', output_template,
+                '-o', '-',  # Output to stdout
                 music_search_url
             ]
             
             # Add cookies if file exists
             if Path(self.cookie_file).exists():
                 cmd.extend(['--cookies', self.cookie_file])
-                logger.info(f"Using cookies from: {self.cookie_file}")
-            else:
-                logger.warning(f"Cookie file not found: {self.cookie_file}")
             
-            logger.info(f"Executing yt-dlp command: {' '.join(cmd)}")
+            logger.info(f"Executing streaming yt-dlp command")
             
-            # Use thread executor for non-blocking subprocess execution
-            loop = asyncio.get_event_loop()
-            
-            def _download():
-                try:
-                    result = subprocess.run(
-                        cmd,
-                        capture_output=True,
-                        text=True,
-                        encoding='utf-8',
-                        errors='replace',
-                        timeout=120,
-                        cwd=output_dir  # Set working directory
-                    )
-                    
-                    if result.returncode == 0:
-                        logger.info("yt-dlp subprocess completed successfully")
-                        if result.stdout:
-                            logger.info(f"yt-dlp stdout: {result.stdout[-500:]}")  # Last 500 chars
-                        
-                        # Find downloaded file
-                        audio_extensions = ['.m4a', '.webm', '.opus', '.mp3', '.aac', '.mp4']
-                        for file in Path(output_dir).iterdir():
-                            if file.is_file() and file.suffix.lower() in audio_extensions:
-                                logger.info(f"Successfully downloaded: {file.name}")
-                                return {
-                                    'file_path': str(file),
-                                    'file_name': file.name,
-                                    'file_size': file.stat().st_size,
-                                    'content_type': self._get_content_type(file.suffix)
-                                }
-                        
-                        raise Exception("Download completed but no audio file found")
-                    else:
-                        error_msg = f"yt-dlp failed with return code {result.returncode}"
-                        if result.stderr:
-                            error_msg += f"\nStderr: {result.stderr}"
-                        if result.stdout:
-                            error_msg += f"\nStdout: {result.stdout}"
-                        logger.error(error_msg)
-                        raise Exception(error_msg)
-                        
-                except subprocess.TimeoutExpired:
-                    raise Exception("yt-dlp subprocess timed out after 120 seconds")
-                except Exception as e:
-                    logger.error(f"Subprocess execution failed: {str(e)}")
-                    raise e
-            
-            # Execute with timeout
-            result = await asyncio.wait_for(
-                loop.run_in_executor(None, _download),
-                timeout=150.0  # Slightly longer than subprocess timeout
-            )
-            
-            download_time = time.time() - start_time
-            logger.info(f"Download completed in {download_time:.2f} seconds")
-            
-            return DownloadResult(success=True, **result)
-            
-        except asyncio.TimeoutError:
-            error_msg = "Download timed out after 150 seconds"
-            logger.error(error_msg)
-            return DownloadResult(success=False, error=error_msg)
-            
-        except Exception as e:
-            error_msg = f"Download error: {str(e)}"
-            logger.error(f"{error_msg}\n{traceback.format_exc()}")
-            
-            # If download fails, try fallback approach
-            if "403" in str(e) or "Forbidden" in str(e) or "HTTP Error 403" in str(e):
-                logger.info("Attempting fallback download with relaxed restrictions...")
-                try:
-                    return await self._fallback_download(search_query, output_dir)
-                except Exception as fallback_error:
-                    logger.error(f"Fallback download also failed: {fallback_error}")
-            
-            return DownloadResult(success=False, error=error_msg)
-    
-    async def _fallback_download(self, search_query: str, output_dir: str) -> DownloadResult:
-        """Fallback download method with minimal restrictions using subprocess"""
-        try:
-            output_template = str(Path(output_dir) / '%(title)s.%(ext)s')
-            music_search_url = f"https://music.youtube.com/search?q={urllib.parse.quote(search_query)}"
-            
-            # Enhanced fallback command with format preferences
-            cmd = [
-                sys.executable, '-m', 'yt_dlp',
-                '-f', 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best',
-                '--no-post-overwrites',
-                '--no-playlist',
-                '--playlist-items', '1',
-                '--socket-timeout', '180',
-                '--retries', '3',
-                '--fragment-retries', '2',
-                '--geo-bypass',
-                '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                '-o', output_template,
-                music_search_url
-            ]
-            
-            # Add cookies if available
-            if Path(self.cookie_file).exists():
-                cmd.extend(['--cookies', self.cookie_file])
-            
-            logger.info(f"Fallback command: {' '.join(cmd)}")
-            
-            loop = asyncio.get_event_loop()
-            
-            def _fallback_download_sync():
-                result = subprocess.run(
+            # Return a generator that yields chunks
+            async def stream_generator():
+                # Use synchronous Popen since Windows asyncio subprocess is broken
+                process = subprocess.Popen(
                     cmd,
-                    capture_output=True,
-                    text=True,
-                    encoding='utf-8',
-                    errors='replace',
-                    timeout=180,
-                    cwd=output_dir
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    bufsize=8192
                 )
                 
-                if result.returncode == 0:
-                    # Find downloaded file
-                    audio_extensions = ['.m4a', '.webm', '.opus', '.mp3', '.aac']
-                    for file in Path(output_dir).iterdir():
-                        if file.is_file() and file.suffix.lower() in audio_extensions:
-                            return {
-                                'file_path': str(file),
-                                'file_name': file.name,
-                                'file_size': file.stat().st_size,
-                                'content_type': self._get_content_type(file.suffix)
-                            }
-                    raise Exception("Fallback download: file not found")
-                else:
-                    error_msg = f"Fallback failed with return code {result.returncode}"
-                    if result.stderr:
-                        error_msg += f"\nStderr: {result.stderr}"
-                    raise Exception(error_msg)
+                try:
+                    # Read chunks in a non-blocking way using a thread pool
+                    loop = asyncio.get_event_loop()
+                    
+                    while True:
+                        # Read chunk in thread pool to avoid blocking
+                        chunk = await loop.run_in_executor(None, process.stdout.read, 8192)
+                        if not chunk:
+                            break
+                        yield chunk
+                    
+                    # Wait for process to complete
+                    returncode = await loop.run_in_executor(None, process.wait)
+                    
+                    if returncode != 0:
+                        stderr = process.stderr.read()
+                        raise Exception(f"yt-dlp failed: {stderr.decode('utf-8', errors='replace')}")
+                        
+                except Exception as e:
+                    process.kill()
+                    raise e
+                finally:
+                    # Ensure streams are closed
+                    if process.stdout:
+                        process.stdout.close()
+                    if process.stderr:
+                        process.stderr.close()
             
-            result = await asyncio.wait_for(
-                loop.run_in_executor(None, _fallback_download_sync),
-                timeout=200.0
-            )
-            
-            return DownloadResult(success=True, **result)
+            return stream_generator()
             
         except Exception as e:
-            logger.error(f"Fallback download failed: {str(e)}")
+            logger.error(f"Download error: {str(e)}\n{traceback.format_exc()}")
             raise e
-
-    @staticmethod
-    def _get_content_type(file_extension: str) -> str:
-        """Get MIME type for audio file extension"""
-        content_type_map = {
-            '.m4a': 'audio/mp4',
-            '.webm': 'audio/webm',
-            '.opus': 'audio/opus',
-            '.mp3': 'audio/mpeg',
-            '.aac': 'audio/aac',
-            '.mp4': 'audio/mp4'
-        }
-        return content_type_map.get(file_extension.lower(), 'audio/octet-stream')
-
-
+        
 
 
 @app.post("/api/spotify/download-song")
 async def download_song_frontend(
     request: DownloadRequest,
-    api_key: str = Depends(get_api_key)  # API Key validation required
+    api_key: str = Depends(get_api_key)
 ):
     """
-    Production-ready frontend-compatible download endpoint. Requires X-API-KEY header.
-    Returns audio blob directly with comprehensive error handling and performance optimization
+    Production-ready streaming download endpoint. Requires X-API-KEY header.
+    Streams audio directly without timeout issues.
     """
     request_id = f"req_{int(time.time() * 1000)}"
-    logger.info(f"[{request_id}] Download request received - trackId: {request.trackId}, url: {request.get_spotify_url()}")
+    logger.info(f"[{request_id}] Download request received")
     
     start_time = time.time()
-    temp_dir = None
     
     try:
         # Input validation
@@ -557,15 +432,8 @@ async def download_song_frontend(
         if not spotify_url and not has_metadata:
             raise HTTPException(
                 status_code=400, 
-                detail="Either Spotify URL/Track ID or complete track metadata (title + artist) is required"
+                detail="Either Spotify URL/Track ID or complete track metadata required"
             )
-        
-        logger.info(f"[{request_id}] Input validation passed - URL: {spotify_url}, has_metadata: {has_metadata}")
-        
-        # Create secure temporary directory using OS-appropriate temp location
-        temp_base_dir = "/tmp" if sys.platform != "win32" else None  # Use default temp dir on Windows
-        temp_dir = tempfile.mkdtemp(prefix=f"song_dl_{request_id}_", dir=temp_base_dir)
-        logger.info(f"[{request_id}] Created temp directory: {temp_dir}")
         
         # Initialize services
         extractor = SpotifyTrackExtractor()
@@ -575,9 +443,7 @@ async def download_song_frontend(
         track_info: Optional[TrackInfo] = None
         
         if has_metadata:
-            logger.info(f"[{request_id}] Using provided metadata")
             artists = [a.strip() for a in request.get_artist_name().split(",")] if "," in request.get_artist_name() else [request.get_artist_name()]
-            
             track_info = TrackInfo(
                 name=request.get_track_name(),
                 artists=artists,
@@ -586,102 +452,48 @@ async def download_song_frontend(
                 duration=request.duration
             )
         else:
-            logger.info(f"[{request_id}] Extracting track info from Spotify URL")
-            
-            # Try API first, then fallback to oEmbed
-            try:
-                track_info = await extractor.extract_from_api(spotify_url)
-            except Exception as e:
-                logger.warning(f"[{request_id}] API extraction failed: {e}")
-            
+            track_info = await extractor.extract_from_api(spotify_url)
             if not track_info:
-                logger.info(f"[{request_id}] Falling back to oEmbed extraction")
                 track_info = extractor.extract_from_oembed(spotify_url)
-            
             if not track_info:
-                raise HTTPException(
-                    status_code=400, 
-                    detail="Could not extract track information from Spotify URL"
-                )
+                raise HTTPException(status_code=400, detail="Could not extract track information")
         
-        logger.info(f"[{request_id}] Track info: {track_info.name} by {', '.join(track_info.artists)}")
+        logger.info(f"[{request_id}] Starting streaming download: {track_info.search_query}")
         
-        # Download audio
-        logger.info(f"[{request_id}] Starting download with query: {track_info.search_query}")
-        download_result = await downloader.download_audio(track_info.search_query, temp_dir)
+        # Get the streaming generator
+        stream = await downloader.download_audio(track_info.search_query)
         
-        if not download_result.success:
-            raise HTTPException(
-                status_code=500, 
-                detail=f"Download failed: {download_result.error}"
-            )
-        
-        # Prepare response
-        file_path = Path(download_result.file_path)
-        if not file_path.exists():
-            raise HTTPException(status_code=404, detail="Downloaded file not found")
-        
-        # Read file content efficiently
-        file_content = file_path.read_bytes()
-        
-        # Prepare headers
-        # Prepare Content-Disposition header with UTF-8 filename support (RFC 5987)
+        # Prepare headers with UTF-8 filename support
+        filename = f"{track_info.name} - {', '.join(track_info.artists)}.m4a"
         from urllib.parse import quote
-        ascii_filename = (
-            download_result.file_name.encode('ascii', 'ignore').decode('ascii')
-            if any(ord(c) > 127 for c in download_result.file_name)
-            else download_result.file_name
-        )
-        quoted_filename = quote(download_result.file_name)
-        content_disposition = (
-            f"attachment; filename=\"{ascii_filename}\"; filename*=UTF-8''{quoted_filename}"
-        )
+        ascii_filename = filename.encode('ascii', 'ignore').decode('ascii')
+        quoted_filename = quote(filename)
+        
         headers = {
-            "Content-Disposition": content_disposition,
-            "Content-Length": str(len(file_content)),
+            "Content-Disposition": f"attachment; filename=\"{ascii_filename}\"; filename*=UTF-8''{quoted_filename}",
             "X-Track-Name": track_info.name,
             "X-Track-Artist": ", ".join(track_info.artists),
             "X-Request-Id": request_id,
-            "X-Download-Time": f"{time.time() - start_time:.2f}s"
         }
         
         if track_info.album:
             headers["X-Track-Album"] = track_info.album
-        if track_info.duration:
-            headers["X-Track-Duration"] = track_info.duration
         
-        logger.info(f"[{request_id}] Download completed in {time.time() - start_time:.2f}s - Size: {len(file_content)} bytes")
-        
-        # Stream response efficiently
-        def iter_file_content():
-            chunk_size = 8192  # 8KB chunks
-            for i in range(0, len(file_content), chunk_size):
-                yield file_content[i:i + chunk_size]
+        logger.info(f"[{request_id}] Streaming response started")
         
         return StreamingResponse(
-            iter_file_content(),
-            media_type=download_result.content_type,
+            stream,
+            media_type="audio/mp4",
             headers=headers
         )
         
     except HTTPException:
         raise
-    except asyncio.TimeoutError:
-        error_msg = "Download operation timed out"
-        logger.error(f"[{request_id}] {error_msg}")
-        raise HTTPException(status_code=504, detail=error_msg)
     except Exception as e:
         error_msg = f"Unexpected error: {str(e)}"
         logger.error(f"[{request_id}] {error_msg}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=error_msg)
-    finally:
-        # Cleanup
-        if temp_dir and Path(temp_dir).exists():
-            try:
-                shutil.rmtree(temp_dir, ignore_errors=True)
-                logger.info(f"[{request_id}] Cleaned up temp directory")
-            except Exception as e:
-                logger.warning(f"[{request_id}] Failed to cleanup temp directory: {e}")
+    
 
 @app.get("/api/spotify/track-metadata")
 async def get_track_metadata(url: str):
