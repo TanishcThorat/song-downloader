@@ -357,7 +357,6 @@ class YtDlpDownloader:
                 '--playlist-items', '1',  # Only download first result
                 '--socket-timeout', '120',
                 '--retries', '2',
-                '--user-agent', 'yt-dlp/2023.07.06',
                 '-o', output_template,
                 music_search_url
             ]
